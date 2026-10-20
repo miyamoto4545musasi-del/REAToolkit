@@ -10,7 +10,9 @@ from .common import (
     PackageOptions,
     banner_of,
     build_manifest,
+    collect_asset_overrides,
     write_manifest,
+    write_overrides,
     write_text,
 )
 
@@ -452,7 +454,14 @@ def emit_android(
     registry = registry or PluginRegistry()
     ctx = ctx or PluginContext(options=options.plugin_options)
 
-    manifest = registry.run_manifest(build_manifest(rom, options), ctx)
+    manifest = build_manifest(rom, options)
+    overrides = collect_asset_overrides(rom, registry, ctx)
+    if overrides:
+        manifest["overrides"] = {
+            "root": "reatk/overrides",
+            "assets": sorted(overrides),
+        }
+    manifest = registry.run_manifest(manifest, ctx)
     app_name = manifest["app"]["name"]
     bundle_id = manifest["app"]["bundle_id"]
     namespace = _namespace(bundle_id)
@@ -502,6 +511,8 @@ def emit_android(
             )
 
     write_manifest(manifest, main / "assets" / "reatk" / "manifest.json")
+    if overrides:
+        write_overrides(overrides, main / "assets" / "reatk" / "overrides")
 
     rom_note = (
         "4. Nothing else - the ROM is embedded at "

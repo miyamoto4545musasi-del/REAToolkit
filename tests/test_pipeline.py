@@ -1,5 +1,4 @@
 import json
-import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -196,8 +195,21 @@ class TestPlugins(unittest.TestCase):
             fs = rom.filesystem()
             entry = fs.find("*a.bin")[0]
             self.assertEqual(registry.run_asset(entry, fs.read(entry), ctx), b"replaced")
-            manifest = registry.run_manifest(build_manifest(rom, PackageOptions(out_dir=Path(tmp))), ctx)
+
+            # The same hook drives packaging: the replacement lands in the app
+            # bundle and is listed in the manifest.
+            out = Path(tmp) / "out"
+            emit(
+                "apk",
+                rom,
+                PackageOptions(out_dir=out, plugin_options={"assets": str(Path(tmp) / "mod")}),
+                registry=registry,
+                ctx=ctx,
+            )
+            manifest = json.loads((out / "app/src/main/assets/reatk/manifest.json").read_text())
             self.assertEqual(manifest["overrides"]["assets"], ["/data/a.bin"])
+            override = out / "app/src/main/assets/reatk/overrides/data/a.bin"
+            self.assertEqual(override.read_bytes(), b"replaced")
 
     def test_ips_patch_plain_and_rle_records(self):
         patch = b"PATCH"

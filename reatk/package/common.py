@@ -115,6 +115,44 @@ def build_manifest(rom, options: PackageOptions) -> dict:
     return manifest
 
 
+def collect_asset_overrides(rom, registry, ctx) -> dict[str, bytes]:
+    """Run the plugins' ``on_asset`` hook over the embedded filesystem.
+
+    Returns only the files a plugin actually changed, keyed by their in-ROM
+    path.  The emitters write these into the app bundle so the runtime can load
+    a replacement without the ROM image itself being modified.
+    """
+    if registry is None or not registry.plugins:
+        return {}
+    try:
+        fs = rom.filesystem()
+        entries = fs.entries()
+    except Exception:
+        return {}  # a title with no readable filesystem simply has no overrides
+
+    overrides: dict[str, bytes] = {}
+    for entry in entries:
+        original = fs.read(entry)
+        replacement = registry.run_asset(entry, original, ctx)
+        if replacement != original:
+            overrides[str(entry.path)] = replacement
+    return overrides
+
+
+def write_overrides(overrides: dict[str, bytes], root: Path) -> list[Path]:
+    """Write collected overrides under *root*, mirroring their ROM paths."""
+    written = []
+    for path, payload in sorted(overrides.items()):
+        target = root / path.lstrip("/")
+        # Paths come from the ROM, so make sure they stay inside the project.
+        if root.resolve() not in target.resolve().parents:
+            raise ValueError(f"override path {path!r} escapes the project directory")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        written.append(target)
+    return written
+
+
 def write_manifest(manifest: dict, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", "utf-8")

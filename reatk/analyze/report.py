@@ -12,7 +12,10 @@ import math
 import re
 
 from .._util import human_size
+from ..formats.compression import detect as detect_compression
+from ..formats.narc import Narc
 from ..formats.nds import NdsRom
+from ..formats.sdat import Sdat
 
 PRINTABLE = re.compile(rb"[\x20-\x7E]{4,}")
 # Markers that commonly survive into a retail build.
@@ -215,6 +218,76 @@ def _slack_findings(rom: NdsRom) -> list[Finding]:
     return findings
 
 
+def _classify(data: bytes) -> str:
+    """Name what a file is, for the content survey."""
+    codec = detect_compression(data)
+    if codec:
+        return f"compressed:{codec}"
+    if Narc.looks_like(data):
+        return "narc"
+    if Sdat.looks_like(data):
+        return "sdat"
+    magic = data[:4].decode("ascii", "replace")
+    known = {
+        "RLCN": "nclr palette",
+        "RGCN": "ncgr sheet",
+        "RCSN": "nscr screen",
+        "RECN": "ncer cells",
+        "RNAN": "nanr animation",
+        "RTFN": "nftr font",
+        "NFTR": "nftr font",
+    }
+    return known.get(magic, "other")
+
+
+def _content_findings(rom: NdsRom) -> list[Finding]:
+    """What the embedded filesystem is actually made of.
+
+    Worth knowing before anything else: a title whose files are nearly all
+    compressed needs `extract --decompress` before a single string shows up.
+    """
+    try:
+        fs = rom.filesystem()
+        entries = fs.entries()
+    except Exception:
+        return []
+    if not entries:
+        return []
+
+    kinds = collections.Counter(
+        _classify(rom.data[entry.offset : entry.end]) for entry in entries
+    )
+    findings = [
+        Finding(
+            "content",
+            ", ".join(f"{count}x {kind}" for kind, count in kinds.most_common()),
+            "info",
+            {"kinds": dict(kinds.most_common())},
+        )
+    ]
+    compressed = sum(count for kind, count in kinds.items() if kind.startswith("compressed:"))
+    if compressed:
+        findings.append(
+            Finding(
+                "content",
+                f"{compressed} of {len(entries)} files are BIOS-compressed; run "
+                "`reatk extract --decompress` to read them",
+                "info",
+            )
+        )
+    containers = kinds.get("narc", 0) + kinds.get("sdat", 0)
+    if containers:
+        findings.append(
+            Finding(
+                "content",
+                f"{containers} nested archive(s); `--recurse-narc` / `--extract-sdat` "
+                "unpack them",
+                "info",
+            )
+        )
+    return findings
+
+
 _ORDER = {"error": 0, "warning": 1, "info": 2}
 
 
@@ -224,6 +297,7 @@ def analyze(rom: NdsRom) -> dict:
     findings += _integrity_findings(rom)
     findings += _code_findings(rom)
     findings += _fs_findings(rom)
+    findings += _content_findings(rom)
     findings += _leftover_findings(rom)
     findings += _slack_findings(rom)
     findings.sort(key=lambda f: _ORDER.get(f.severity, 3))

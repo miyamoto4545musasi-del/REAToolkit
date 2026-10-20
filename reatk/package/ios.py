@@ -16,7 +16,9 @@ from .common import (
     PackageOptions,
     banner_of,
     build_manifest,
+    collect_asset_overrides,
     write_manifest,
+    write_overrides,
     write_text,
 )
 
@@ -312,7 +314,14 @@ def emit_ios(
     registry = registry or PluginRegistry()
     ctx = ctx or PluginContext(options=options.plugin_options)
 
-    manifest = registry.run_manifest(build_manifest(rom, options), ctx)
+    manifest = build_manifest(rom, options)
+    overrides = collect_asset_overrides(rom, registry, ctx)
+    if overrides:
+        manifest["overrides"] = {
+            "root": "reatk/overrides",
+            "assets": sorted(overrides),
+        }
+    manifest = registry.run_manifest(manifest, ctx)
     app_name = manifest["app"]["name"]
     bundle_id = manifest["app"]["bundle_id"]
     target = _target_name(app_name)
@@ -349,6 +358,8 @@ def emit_ios(
     script.chmod(0o755)
 
     write_manifest(manifest, root / "Resources" / "reatk" / "manifest.json")
+    if overrides:
+        write_overrides(overrides, root / "Resources" / "reatk" / "overrides")
 
     banner = banner_of(rom)
     if banner is not None:

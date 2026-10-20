@@ -2,8 +2,11 @@
 
 Enable with ``--plugin asset-replace --set assets=./my_mod``.  A file at
 ``./my_mod/data/font/main.nftr`` replaces the ROM's ``/data/font/main.nftr``.
-Sizes do not have to match; the packaging stage records the override so the
-runtime loads the replacement from the app bundle instead of the image.
+
+Sizes do not have to match: during ``extract`` the replacement is written in
+place of the original, and during ``convert`` it is copied into the app bundle
+under ``reatk/overrides/`` and listed in the manifest, so the runtime loads it
+instead of the copy inside the image.
 """
 
 from __future__ import annotations
@@ -32,10 +35,3 @@ class AssetReplacePlugin(Plugin):
         ctx.state["asset_overrides"].append(str(entry.path))
         ctx.note(f"asset-replace: {entry.path} <- {candidate}")
         return candidate.read_bytes()
-
-    def on_manifest(self, manifest: dict, ctx: PluginContext) -> dict | None:
-        overrides = ctx.state.get("asset_overrides") or []
-        if not overrides:
-            return None
-        manifest.setdefault("overrides", {})["assets"] = sorted(overrides)
-        return manifest

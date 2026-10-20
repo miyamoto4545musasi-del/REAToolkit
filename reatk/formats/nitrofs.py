@@ -34,10 +34,16 @@ class FsEntry:
 class NitroFs:
     """Random-access view over the cartridge filesystem."""
 
-    def __init__(self, data: bytes, fnt, fat):
+    def __init__(self, data: bytes, fnt, fat, data_base: int = 0):
+        """*data_base* is added to every allocation-table offset.
+
+        Zero for a cartridge image, where the table holds absolute offsets, and
+        the start of the data chunk for a NARC archive, where it does not.
+        """
         self.data = data
         self.fnt = fnt
         self.fat = fat
+        self.data_base = data_base
         self._entries: list[FsEntry] | None = None
 
     # -- low level -------------------------------------------------------
@@ -49,7 +55,11 @@ class NitroFs:
         start, end = u32(self.data, off), u32(self.data, off + 4)
         if end < start:
             raise ParseError(f"file id {file_id} has a negative length")
-        return start, end - start
+        return start + self.data_base, end - start
+
+    def fat_entry(self, file_id: int) -> tuple[int, int]:
+        """``(offset, size)`` for *file_id*, for archives without a name table."""
+        return self._fat_entry(file_id)
 
     def _walk(self, dir_id: int, prefix: PurePosixPath, seen: set[int], out: list[FsEntry]) -> None:
         if dir_id in seen:

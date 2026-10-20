@@ -33,6 +33,13 @@ reatk analyze game.nds --json report.json
 # 内蔵ファイルシステム（NitroFS）の一覧と抽出
 reatk ls game.nds --glob '*.sdat'
 reatk extract game.nds -o out/        # code/ banner/ romfs/ に展開
+reatk extract game.nds -o out/ --all  # + BIOS 圧縮の展開 / NARC 再帰 / SDAT / PNG 化
+
+# 単体ファイルの操作
+reatk decompress data.lz -o data.bin  # LZ77 / LZ11 / Huffman / RLE
+reatk narc pack.narc                  # NARC の一覧（-o で抽出）
+reatk sdat sound.sdat                 # SSEQ/SBNK/SWAR の一覧（-o で抽出）
+reatk gfx sheet.ncgr palette.nclr -o sheet.png
 
 # APK プロジェクトを生成（ROM は同梱せず、起動後に端末から読み込む）
 reatk convert game.nds -t apk -o build/android
@@ -49,9 +56,9 @@ reatk convert homebrew.nds -t apk -o build/hb --embed-rom --i-own-this-rom
 
 | レイヤ | 役割 |
 | --- | --- |
-| `reatk.formats` | NDS / GBA のヘッダ、NitroFS、バナー（アイコン・多言語タイトル）の解析 |
-| `reatk.analyze` | 読み取り専用の検査パス（CRC、エントロピー、残留文字列、未使用領域） |
-| `reatk.convert` | アセット変換（アイコン → PNG、ROM 内ファイルの展開）。PNG 書き出しも自前実装 |
+| `reatk.formats` | NDS / GBA ヘッダ、NitroFS、バナー、**NARC**、**SDAT**、**NCLR/NCGR**、**BIOS 圧縮**（LZ77/LZ11/Huffman/RLE） |
+| `reatk.analyze` | 読み取り専用の検査パス（CRC、エントロピー、残留文字列、未使用領域、中身の内訳） |
+| `reatk.convert` | アセット変換（アイコン・グラフィック → PNG、圧縮展開、アーカイブ再帰展開）。PNG 書き出しも自前実装 |
 | `reatk.package` | Android（Gradle + JNI ホスト）/ iOS（XcodeGen + Swift）プロジェクトの生成 |
 | `reatk.plugins` | 各段階に割り込むユーザー機能 |
 
@@ -69,6 +76,9 @@ reatk convert homebrew.nds -t apk -o build/hb --embed-rom --i-own-this-rom
 
 つまり「ROM を入れたら動くアプリが出てくる」ツールではなく、**1 タイトル専用の
 フロントエンドを機械的に用意するツール**です。
+
+対応フォーマットの詳細・未対応のもの（ARM9 の BLZ、NSCR の画面合成など）は
+[docs/formats.md](docs/formats.md) に一覧があります。
 
 ## プラグイン（オリジナル機能の追加）
 
@@ -92,7 +102,7 @@ class MyPlugin(Plugin):
 | 名前 | 内容 |
 | --- | --- |
 | `ips-patch` | IPS パッチをメモリ上の ROM に適用（`--set ips=patch.ips`） |
-| `asset-replace` | ROM 内ファイルを自前のファイルに差し替え（`--set assets=./mod`） |
+| `asset-replace` | ROM 内ファイルを自前のファイルに差し替え（`--set assets=./mod`）。`extract` では展開結果に反映、`convert` ではアプリ内 `reatk/overrides/` に同梱して manifest に記録 |
 | `touch-controls` | タッチ操作レイアウトを manifest に書き込む（`--set layout=my.json`） |
 
 ```sh

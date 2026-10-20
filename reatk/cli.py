@@ -10,8 +10,13 @@ from pathlib import Path
 from . import __version__
 from ._util import ParseError, human_size
 from .analyze import analyze, extract_strings
-from .convert import extract_all
+from .convert import ExtractOptions, extract_all, write_png
 from .formats import detect, open_rom
+from .formats import graphics
+from .formats.compression import compress_lz77, decompress
+from .formats.compression import detect as detect_compression
+from .formats.narc import Narc
+from .formats.sdat import Sdat
 from .package import PackageOptions, emit
 from .package.common import OwnershipError
 from .plugins import PluginContext, discover
@@ -108,12 +113,93 @@ def cmd_extract(args) -> int:
     ctx = PluginContext(options=_parse_sets(args.set))
     registry.run_rom(rom, ctx)
 
-    written = extract_all(rom, args.out, icon_scale=args.icon_scale)
+    options = ExtractOptions(
+        decompress=args.decompress,
+        recurse_narc=args.recurse_narc,
+        extract_sdat=args.extract_sdat,
+        render_graphics=args.render_graphics,
+        icon_scale=args.icon_scale,
+    )
+    if args.all:
+        options = ExtractOptions.everything(icon_scale=args.icon_scale)
+    written = extract_all(
+        rom,
+        args.out,
+        icon_scale=args.icon_scale,
+        options=options,
+        registry=registry,
+        ctx=ctx,
+    )
     for group, paths in written.items():
         print(f"{group}: {len(paths)} file(s)")
     for line in ctx.log:
         print(f"  {line}")
     print(f"wrote {args.out}")
+    return 0
+
+
+def cmd_decompress(args) -> int:
+    data = Path(args.file).read_bytes()
+    if args.compress:
+        payload = compress_lz77(data)
+        Path(args.out).write_bytes(payload)
+        print(f"lz77: {len(data)} -> {len(payload)} bytes")
+        return 0
+    codec = detect_compression(data)
+    if codec is None:
+        print(
+            f"{args.file}: not a recognised BIOS-compressed stream "
+            f"(header byte 0x{data[0]:02X})",
+            file=sys.stderr,
+        )
+        return 1
+    payload = decompress(data)
+    Path(args.out).write_bytes(payload)
+    print(f"{codec}: {len(data)} -> {len(payload)} bytes")
+    return 0
+
+
+def cmd_narc(args) -> int:
+    archive = Narc(Path(args.file).read_bytes())
+    entries = archive.list()
+    if args.out is None:
+        for entry in entries:
+            print(f"{entry.size:>10}  {entry.path}")
+        print(f"-- {len(entries)} file(s)", file=sys.stderr)
+        return 0
+    out = Path(args.out)
+    for entry in entries:
+        target = out / str(entry.path).lstrip("/")
+        if out.resolve() not in target.resolve().parents:
+            raise SystemExit(f"archive entry {entry.path} escapes the output directory")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(archive.read(entry))
+    print(f"extracted {len(entries)} file(s) to {out}")
+    return 0
+
+
+def cmd_sdat(args) -> int:
+    archive = Sdat(Path(args.file).read_bytes())
+    entries = archive.entries()
+    if args.out is None:
+        for entry in entries:
+            print(f"{entry.kind:<7} {entry.size:>9}  {entry.label}")
+        print(f"-- {archive.summary()}", file=sys.stderr)
+        return 0
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    for entry in entries:
+        (out / f"{entry.label}.{entry.kind}").write_bytes(archive.read(entry))
+    print(f"extracted {len(entries)} record(s) to {out}")
+    return 0
+
+
+def cmd_gfx(args) -> int:
+    rgba, width, height = graphics.render(
+        Path(args.ncgr).read_bytes(), Path(args.nclr).read_bytes(), slot=args.palette
+    )
+    write_png(args.out, rgba, width, height)
+    print(f"wrote {args.out} ({width}x{height})")
     return 0
 
 
@@ -233,6 +319,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("rom")
     p.add_argument("-o", "--out", required=True)
     p.add_argument("--icon-scale", type=int, default=8)
+    p.add_argument("--decompress", action="store_true", help="undo BIOS compression")
+    p.add_argument("--recurse-narc", action="store_true", help="unpack NARC archives")
+    p.add_argument("--extract-sdat", action="store_true", help="unpack sound archives")
+    p.add_argument(
+        "--render-graphics",
+        action="store_true",
+        help="render NCGR sheets that have an NCLR palette beside them",
+    )
+    p.add_argument("--all", action="store_true", help="every pass above")
     _add_plugin_flags(p)
     p.set_defaults(func=cmd_extract)
 
@@ -260,6 +355,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_plugin_flags(p)
     p.set_defaults(func=cmd_convert)
+
+    p = sub.add_parser("decompress", help="decode (or encode) a BIOS-compressed file")
+    p.add_argument("file")
+    p.add_argument("-o", "--out", required=True)
+    p.add_argument(
+        "--compress",
+        action="store_true",
+        help="compress to LZ77 instead, for putting a modified file back",
+    )
+    p.set_defaults(func=cmd_decompress)
+
+    p = sub.add_parser("narc", help="list or extract a NARC archive")
+    p.add_argument("file")
+    p.add_argument("-o", "--out", help="extract here instead of listing")
+    p.set_defaults(func=cmd_narc)
+
+    p = sub.add_parser("sdat", help="list or extract a sound archive")
+    p.add_argument("file")
+    p.add_argument("-o", "--out", help="extract here instead of listing")
+    p.set_defaults(func=cmd_sdat)
+
+    p = sub.add_parser("gfx", help="render an NCGR sheet with an NCLR palette")
+    p.add_argument("ncgr")
+    p.add_argument("nclr")
+    p.add_argument("-o", "--out", required=True)
+    p.add_argument("--palette", type=int, default=0, help="palette slot within the NCLR")
+    p.set_defaults(func=cmd_gfx)
 
     p = sub.add_parser("plugins", help="list discovered plugins")
     p.add_argument("--plugin-dir", action="append")
