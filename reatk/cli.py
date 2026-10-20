@@ -13,7 +13,8 @@ from .analyze import analyze, extract_strings
 from .convert import ExtractOptions, extract_all, write_png
 from .formats import detect, open_rom
 from .formats import graphics
-from .formats.compression import compress_lz77, decompress
+from .formats.compression import compress_blz, compress_lz77, decompress
+from .formats.compression import decompress_blz, looks_like_blz
 from .formats.compression import detect as detect_compression
 from .formats.narc import Narc
 from .formats.sdat import Sdat
@@ -140,6 +141,19 @@ def cmd_extract(args) -> int:
 
 def cmd_decompress(args) -> int:
     data = Path(args.file).read_bytes()
+    if args.blz:
+        if args.compress:
+            payload = compress_blz(data, verbatim=args.blz_verbatim)
+            Path(args.out).write_bytes(payload)
+            print(f"blz: {len(data)} -> {len(payload)} bytes")
+            return 0
+        if not looks_like_blz(data):
+            print(f"{args.file}: no usable BLZ footer", file=sys.stderr)
+            return 1
+        payload = decompress_blz(data)
+        Path(args.out).write_bytes(payload)
+        print(f"blz: {len(data)} -> {len(payload)} bytes")
+        return 0
     if args.compress:
         payload = compress_lz77(data)
         Path(args.out).write_bytes(payload)
@@ -210,31 +224,107 @@ def cmd_convert(args) -> int:
     ctx = PluginContext(options=plugin_options)
     registry.run_rom(rom, ctx)
 
+    if registry.names():
+        print(f"plugins: {', '.join(registry.names())}")
+    return _emit_project(args, rom, registry, ctx, plugin_options)
+
+
+def _emit_project(args, rom, registry, ctx, plugin_options) -> int:
+    """Shared tail of `convert` and `import --emit apk|ipa`."""
     options = PackageOptions(
         out_dir=Path(args.out),
-        app_name=args.app_name,
-        bundle_id=args.bundle_id,
-        version=args.app_version,
-        core=args.core,
-        embed_rom=args.embed_rom,
-        rom_owned=args.i_own_this_rom,
-        icon_scale=args.icon_scale,
-        orientation=args.orientation,
+        app_name=getattr(args, "app_name", None),
+        bundle_id=getattr(args, "bundle_id", None),
+        version=getattr(args, "app_version", "1.0.0"),
+        core=getattr(args, "core", "melonds"),
+        embed_rom=getattr(args, "embed_rom", False),
+        rom_owned=getattr(args, "i_own_this_rom", False),
+        icon_scale=getattr(args, "icon_scale", 8),
+        orientation=getattr(args, "orientation", "both"),
         plugin_options=plugin_options,
     )
+    target = args.target if hasattr(args, "target") else args.emit
     try:
-        root = emit(args.target, rom, options, registry=registry, ctx=ctx)
+        root = emit(target, rom, options, registry=registry, ctx=ctx)
     except OwnershipError as exc:
         print(f"refusing to embed: {exc}", file=sys.stderr)
         return 2
-
-    if registry.names():
-        print(f"plugins: {', '.join(registry.names())}")
     for line in ctx.log:
         print(f"  {line}")
-    print(f"wrote {args.target} project to {root}")
+    print(f"wrote {target} project to {root}")
     print(f"next steps: {root / 'README.md'}")
     return 0
+
+
+def cmd_map(args) -> int:
+    from .transfer import draft_mapping, open_donor
+
+    donor = open_donor(args.source)
+    target = open_rom(args.target_rom)
+    mapping, unmatched = draft_mapping(donor, target, limit_per_file=1)
+    mapping.save(args.out, unmatched)
+    print(f"drafted {len(mapping.entries)} pairing(s) into {args.out}")
+    print(
+        f"  {len(unmatched['target_files_without_a_source'])} target file(s) had no "
+        f"candidate, {len(unmatched['donor_files_unused'])} donor file(s) unused"
+    )
+    print("review the confidences before importing; a draft is a guess, not an answer")
+    return 0
+
+
+def cmd_import(args) -> int:
+    from .transfer import Mapping, apply_mapping, open_donor
+
+    donor = open_donor(args.source)
+    rom = open_rom(args.target_rom)
+    result = apply_mapping(
+        Mapping.load(args.map), donor, rom, force_raw=args.force_raw
+    )
+
+    for note in result.notes:
+        print(f"  {note}")
+    for path, reason in result.skipped:
+        print(f"  skipped {path}: {reason}", file=sys.stderr)
+    print(f"{len(result.payloads)} file(s) ready, {len(result.skipped)} skipped")
+
+    if args.dry_run:
+        if args.report:
+            Path(args.report).write_text(
+                json.dumps(result.as_dict(), ensure_ascii=False, indent=2) + "\n", "utf-8"
+            )
+            print(f"wrote {args.report}")
+        return 0 if result.payloads else 1
+    if not args.out:
+        raise SystemExit("--out is required unless --dry-run is given")
+    if not result.payloads:
+        print("nothing to write", file=sys.stderr)
+        return 1
+
+    if args.emit == "files":
+        out = Path(args.out)
+        for path, payload in sorted(result.payloads.items()):
+            target = out / path.lstrip("/")
+            if out.resolve() not in target.resolve().parents:
+                raise SystemExit(f"{path} escapes the output directory")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        if args.report:
+            Path(args.report).write_text(
+                json.dumps(result.as_dict(), ensure_ascii=False, indent=2) + "\n", "utf-8"
+            )
+        print(f"wrote {len(result.payloads)} file(s) to {out}")
+        return 0
+
+    # Emit an app project with the imported files bundled as overrides.
+    plugin_options = {
+        "from": str(args.source),
+        "map": str(args.map),
+        "force-raw": "1" if args.force_raw else "",
+    }
+    registry = discover(enabled=["cross-import"])
+    ctx = PluginContext(options=plugin_options)
+    registry.run_rom(rom, ctx)
+    return _emit_project(args, rom, registry, ctx, plugin_options)
 
 
 def cmd_plugins(args) -> int:
@@ -362,7 +452,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--compress",
         action="store_true",
-        help="compress to LZ77 instead, for putting a modified file back",
+        help="compress instead, for putting a modified file back",
+    )
+    p.add_argument(
+        "--blz",
+        action="store_true",
+        help="treat the file as an ARM9-style BLZ image rather than a BIOS stream",
+    )
+    p.add_argument(
+        "--blz-verbatim",
+        type=int,
+        default=0,
+        help="with --blz --compress, bytes to leave uncompressed at the start",
     )
     p.set_defaults(func=cmd_decompress)
 
@@ -382,6 +483,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--out", required=True)
     p.add_argument("--palette", type=int, default=0, help="palette slot within the NCLR")
     p.set_defaults(func=cmd_gfx)
+
+    p = sub.add_parser(
+        "map", help="draft a file pairing between a donor and a target ROM"
+    )
+    p.add_argument("--from", dest="source", required=True, help="donor ROM or directory")
+    p.add_argument("--to", dest="target_rom", required=True, help="target ROM")
+    p.add_argument("-o", "--out", required=True, help="mapping file to write")
+    p.set_defaults(func=cmd_map)
+
+    p = sub.add_parser(
+        "import", help="import material from another title into this one"
+    )
+    p.add_argument("--from", dest="source", required=True, help="donor ROM or directory")
+    p.add_argument("--to", dest="target_rom", required=True, help="target ROM")
+    p.add_argument("--map", required=True, help="mapping file from `reatk map`")
+    p.add_argument("-o", "--out", help="output directory (not needed with --dry-run)")
+    p.add_argument(
+        "--emit",
+        default="files",
+        choices=["files", "apk", "android", "ipa", "ios"],
+        help="write the replaced files, or a whole app project around them",
+    )
+    p.add_argument("--report", help="write a JSON report of what happened")
+    p.add_argument("--dry-run", action="store_true", help="decide but write nothing")
+    p.add_argument(
+        "--force-raw",
+        action="store_true",
+        help="write a replacement even where the original compression cannot be "
+        "reproduced (the game may fail to load it)",
+    )
+    p.add_argument("--app-name")
+    p.add_argument("--bundle-id")
+    p.add_argument("--app-version", default="1.0.0")
+    p.add_argument("--core", default="melonds")
+    p.add_argument("--orientation", default="both", choices=["portrait", "landscape", "both"])
+    p.add_argument("--icon-scale", type=int, default=8)
+    p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("plugins", help="list discovered plugins")
     p.add_argument("--plugin-dir", action="append")

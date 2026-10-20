@@ -12,6 +12,8 @@ reatk convert game.nds -t apk -o out
   ├─ ROM をパース
   ├─ on_rom(rom, ctx)                 rom.data を書き換えてもよい（IPS 適用など）
   ├─ on_asset(entry, data, ctx)       NitroFS の 1 ファイルごと。bytes を返すと差し替え
+  │                                   （extract でも convert でも呼ばれる。convert では
+  │                                    変わったファイルだけがアプリ内 reatk/overrides/ へ）
   ├─ on_manifest(manifest, ctx)       dict を返すとアプリ manifest を置き換え
   ├─ プロジェクトをディスクへ書き出し
   └─ on_project(project_dir, ctx)     生成物に追記・追加ファイルを置く
@@ -58,6 +60,15 @@ class DefaultSettings(Plugin):
 reatk convert game.nds -t apk -o out \
     --plugin-dir ./my_plugins --plugin default-settings --set frameskip=1
 ```
+
+## 同梱プラグイン
+
+| 名前 | 使うフック | 内容 |
+| --- | --- | --- |
+| `ips-patch` | `on_rom` | IPS パッチを適用 |
+| `asset-replace` | `on_asset` | ディレクトリの同名ファイルで差し替え |
+| `cross-import` | `on_rom` + `on_asset` | 別タイトルから素材を取り込む（[docs/import.md](import.md)） |
+| `touch-controls` | `on_manifest` | タッチ操作レイアウトを書き込む |
 
 ## 注意
 

@@ -13,6 +13,7 @@ import re
 
 from .._util import human_size
 from ..formats.compression import detect as detect_compression
+from ..formats.compression import looks_like_blz
 from ..formats.narc import Narc
 from ..formats.nds import NdsRom
 from ..formats.sdat import Sdat
@@ -165,7 +166,16 @@ def _code_findings(rom: NdsRom) -> list[Finding]:
                 {"entropy": round(ent, 3), "offset": region.offset, "size": region.size},
             )
         )
-        if ent > 7.5:
+        if region.name == "arm9" and looks_like_blz(blob):
+            findings.append(
+                Finding(
+                    "code",
+                    "arm9 carries a BLZ footer; `reatk extract --decompress` also "
+                    "writes arm9.dec.bin",
+                    "info",
+                )
+            )
+        elif ent > 7.5:
             findings.append(
                 Finding(
                     "code",

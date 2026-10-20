@@ -98,6 +98,8 @@ class TestPackage(unittest.TestCase):
                 "app/src/main/AndroidManifest.xml",
                 "app/src/main/java/com/t/app/MainActivity.kt",
                 "app/src/main/java/com/t/app/EmuCore.kt",
+                "app/src/main/java/com/t/app/EmuView.kt",
+                "app/src/main/java/com/t/app/ControlOverlay.kt",
                 "app/src/main/cpp/reatk_host.c",
                 "app/src/main/cpp/CMakeLists.txt",
                 "app/src/main/assets/reatk/manifest.json",
@@ -118,7 +120,9 @@ class TestPackage(unittest.TestCase):
                 "README.md",
                 "Sources/AppDelegate.swift",
                 "Sources/GameViewController.swift",
-                "Sources/EmuCore.swift",
+                "Sources/EmulatorCore.swift",
+                "Sources/ControlOverlay.swift",
+                "Sources/AudioOutput.swift",
                 "Resources/Info.plist",
                 "Resources/AppIcon.png",
                 "Resources/reatk/manifest.json",
@@ -171,7 +175,9 @@ class TestPackage(unittest.TestCase):
 class TestPlugins(unittest.TestCase):
     def test_builtins_are_discovered(self):
         names = set(discover().names())
-        self.assertEqual(names, {"ips-patch", "asset-replace", "touch-controls"})
+        self.assertEqual(
+            names, {"ips-patch", "asset-replace", "touch-controls", "cross-import"}
+        )
 
     def test_touch_controls_lands_in_the_manifest(self):
         rom = NdsRom(make_nds())
@@ -317,3 +323,35 @@ class TestCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTemplates(unittest.TestCase):
+    """The emitters have to supply every placeholder their templates use."""
+
+    def test_every_template_is_fully_rendered(self):
+        from reatk.formats.nds import NdsRom
+        from tests.fixtures import make_nds
+
+        rom = NdsRom(make_nds())
+        for target in ("apk", "ipa"):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = emit(target, rom, PackageOptions(out_dir=Path(tmp)))
+                for path in root.rglob("*"):
+                    if not path.is_file() or path.suffix in (".png", ".nds"):
+                        continue
+                    self.assertNotIn(
+                        "@@", path.read_text("utf-8"), f"{path} has an unfilled token"
+                    )
+
+    def test_missing_token_is_an_error(self):
+        from reatk.package import templates
+
+        with self.assertRaises(templates.MissingToken):
+            templates.render("android/settings.gradle.kts")
+
+    def test_android_templates_cover_the_generated_sources(self):
+        from reatk.package import templates
+
+        self.assertEqual(
+            templates.tokens("android/reatk_host.c"), {"CORE", "JNI_PREFIX"}
+        )

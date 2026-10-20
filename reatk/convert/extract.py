@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 from ..formats import graphics
-from ..formats.compression import maybe_decompress
+from ..formats.compression import decompress_blz, looks_like_blz, maybe_decompress
 from ..formats.narc import Narc
 from ..formats.nds import NdsRom
 from ..formats.sdat import Sdat
@@ -42,16 +42,40 @@ class ExtractOptions:
         )
 
 
-def extract_code(rom: NdsRom, out_dir: Path) -> list[Path]:
-    """Write the ARM9/ARM7 binaries and their overlay tables."""
+def extract_code(
+    rom: NdsRom, out_dir: Path, decompress: bool = False, ctx=None
+) -> list[Path]:
+    """Write the ARM9/ARM7 binaries and their overlay tables.
+
+    With *decompress*, a BLZ-compressed ARM9 also gets a decoded copy as
+    ``arm9.dec.bin``.  The raw file stays: it is what the cartridge holds, and
+    the decoder is the part most likely to be wrong on an unusual build.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for region in (rom.arm9, rom.arm7, rom.arm9_overlay, rom.arm7_overlay):
         if not region.size:
             continue
+        payload = rom.read_region(region)
         target = out_dir / f"{region.name}.bin"
-        target.write_bytes(rom.read_region(region))
+        target.write_bytes(payload)
         written.append(target)
+
+        if decompress and region.name == "arm9" and looks_like_blz(payload):
+            try:
+                decoded = decompress_blz(payload)
+            except ParseError as exc:
+                if ctx is not None:
+                    ctx.note(f"arm9: BLZ footer present but decoding failed ({exc})")
+                continue
+            decoded_target = out_dir / "arm9.dec.bin"
+            decoded_target.write_bytes(decoded)
+            written.append(decoded_target)
+            if ctx is not None:
+                ctx.note(
+                    f"arm9: BLZ decoded, {len(payload)} -> {len(decoded)} bytes "
+                    "(arm9.dec.bin)"
+                )
     return written
 
 
@@ -210,8 +234,9 @@ def extract_all(
 ) -> dict[str, list[Path]]:
     """Run every extractor into ``<out_dir>/{code,banner,romfs}``."""
     out_dir = Path(out_dir)
+    options = options or ExtractOptions()
     return {
-        "code": extract_code(rom, out_dir / "code"),
+        "code": extract_code(rom, out_dir / "code", options.decompress, ctx),
         "banner": extract_banner(rom, out_dir / "banner", icon_scale),
         "romfs": extract_filesystem(rom, out_dir / "romfs", options, registry, ctx),
     }

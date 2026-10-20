@@ -17,6 +17,8 @@ format applied by the linker rather than the BIOS; it is not handled here.
 
 from __future__ import annotations
 
+import dataclasses
+
 from .._util import ParseError
 
 LZ77 = 0x10
@@ -272,3 +274,176 @@ def compress_lz77(data: bytes, min_match: int = 3) -> bytes:
                 pos += 1
         out[flags_index] = flags
     return bytes(out)
+
+
+# -- BLZ -----------------------------------------------------------------
+#
+# The ARM9 binary is not compressed by the BIOS routines above but by the
+# linker, with "backwards LZ": the tail of the file is compressed from the end
+# towards the start, and an 8-byte footer describes the layout.
+#
+#     [ verbatim head ][ compressed block ][ footer ]
+#
+#     footer[-4:]  increase in size when decompressed
+#     footer[-5]   header length (8..11)
+#     footer[-8:-5] (24 bits) length of the compressed block plus the footer
+#
+# Tokens are read from the *reversed* block: a flag byte, then either a literal
+# or a two-byte back-reference with a 4-bit length and a 12-bit distance.
+
+BLZ_HEADER_RANGE = range(0x08, 0x0C)
+BLZ_MAX_LENGTH = 18
+BLZ_MAX_DISTANCE = 0x1002
+
+
+@dataclasses.dataclass(frozen=True)
+class BlzFooter:
+    """The sizes the footer describes, all in bytes."""
+
+    verbatim: int  # head copied as-is
+    stream: int  # compressed bytes, after the head
+    decompressed: int  # total size once decoded
+    header_length: int
+
+
+def read_blz_footer(data: bytes) -> BlzFooter | None:
+    """Parse and sanity-check the footer, or ``None`` when it is not BLZ."""
+    if len(data) < 12:
+        return None
+    increase = int.from_bytes(data[-4:], "little")
+    if increase == 0:
+        return None  # a valid footer saying "this file is not compressed"
+    header_length = data[-5]
+    if header_length not in BLZ_HEADER_RANGE:
+        return None
+    encoded = int.from_bytes(data[-8:-5], "little") & 0xFFFFFF
+    if not 0 < encoded <= len(data) or encoded <= header_length:
+        return None
+
+    verbatim = len(data) - encoded
+    stream = encoded - header_length
+    decompressed = verbatim + encoded + increase
+    if verbatim < 0 or stream <= 0 or decompressed <= len(data):
+        return None
+    if decompressed > 0x1000000:
+        return None  # 16 MiB; an ARM9 binary is never close to this
+    return BlzFooter(verbatim, stream, decompressed, header_length)
+
+
+def looks_like_blz(data: bytes) -> bool:
+    """Whether *data* carries a plausible BLZ footer."""
+    return read_blz_footer(data) is not None
+
+
+def decompress_blz(data: bytes) -> bytes:
+    """Decompress an ARM9-style BLZ image."""
+    footer = read_blz_footer(data)
+    if footer is None:
+        raise ParseError("no usable BLZ footer (is this really a compressed ARM9?)")
+
+    out = bytearray(footer.decompressed)
+    out[: footer.verbatim] = data[: footer.verbatim]
+
+    # Both the token stream and the region it fills run backwards.
+    stream = data[footer.verbatim : footer.verbatim + footer.stream][::-1]
+    position = footer.verbatim
+    cursor = 0
+    flags = 0
+    mask = 0
+
+    while position < footer.decompressed:
+        if mask == 0:
+            if cursor >= len(stream):
+                break
+            flags = stream[cursor]
+            cursor += 1
+            mask = 0x80
+        if flags & mask:
+            if cursor + 1 >= len(stream):
+                break
+            token = stream[cursor] << 8 | stream[cursor + 1]
+            cursor += 2
+            length = (token >> 12) + 3
+            distance = (token & 0x0FFF) + 3
+            if position - distance < 0:
+                raise ParseError("BLZ back-reference points before the output")
+            for _ in range(length):
+                if position >= footer.decompressed:
+                    break
+                out[position] = out[position - distance]
+                position += 1
+        else:
+            if cursor >= len(stream):
+                break
+            out[position] = stream[cursor]
+            cursor += 1
+            position += 1
+        mask >>= 1
+
+    if position != footer.decompressed:
+        raise ParseError(
+            f"BLZ stream ended after {position} of {footer.decompressed} bytes"
+        )
+
+    # Undo the reversal of the region that was decoded.
+    out[footer.verbatim :] = out[footer.verbatim :][::-1]
+    return bytes(out)
+
+
+def compress_blz(data: bytes, verbatim: int = 0) -> bytes:
+    """Compress *data* into the BLZ layout, leaving *verbatim* bytes untouched.
+
+    The ARM9 binary needs its first instructions readable by the loader, which
+    is what *verbatim* is for.  Written mainly so the decoder can be tested
+    against something other than itself, but it produces real streams.
+    """
+    if verbatim < 0 or verbatim > len(data):
+        raise ValueError("verbatim length is outside the data")
+    header_length = 8
+    tail = data[verbatim:][::-1]  # compress the tail backwards
+
+    tokens = bytearray()
+    position = 0
+    while position < len(tail):
+        flags_index = len(tokens)
+        tokens.append(0)
+        flags = 0
+        for bit in range(7, -1, -1):
+            if position >= len(tail):
+                break
+            window_start = max(3, position - BLZ_MAX_DISTANCE + 1)
+            best_length, best_distance = 0, 0
+            for distance in range(3, min(BLZ_MAX_DISTANCE, position) + 1):
+                length = 0
+                while (
+                    length < BLZ_MAX_LENGTH
+                    and position + length < len(tail)
+                    and tail[position - distance + length] == tail[position + length]
+                ):
+                    length += 1
+                if length > best_length:
+                    best_length, best_distance = length, distance
+                    if length == BLZ_MAX_LENGTH:
+                        break
+            if best_length >= 3 and window_start <= position:
+                flags |= 1 << bit
+                token = (best_length - 3) << 12 | (best_distance - 3)
+                tokens.append(token >> 8)
+                tokens.append(token & 0xFF)
+                position += best_length
+            else:
+                tokens.append(tail[position])
+                position += 1
+        tokens[flags_index] = flags
+
+    stream = bytes(tokens)[::-1]
+    encoded = len(stream) + header_length
+    increase = len(data) - (verbatim + encoded)
+    if increase <= 0:
+        raise ValueError("this data does not get smaller as BLZ; store it raw")
+    footer = (
+        encoded.to_bytes(3, "little")
+        + bytes([header_length])
+        + increase.to_bytes(4, "little")
+    )
+    return data[:verbatim] + stream + footer

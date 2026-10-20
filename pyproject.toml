@@ -24,3 +24,6 @@ Source = "https://github.com/miyamoto4545musasi-del/REAToolkit"
 
 [tool.setuptools.packages.find]
 include = ["reatk*"]
+
+[tool.setuptools.package-data]
+reatk = ["package/templates/*/*"]

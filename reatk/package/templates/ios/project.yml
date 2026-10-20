@@ -1,0 +1,36 @@
+name: @@TARGET@@
+options:
+  bundleIdPrefix: @@PREFIX@@
+  deploymentTarget:
+    iOS: "14.0"
+settings:
+  base:
+    # Sideloading only: no team is set, sign with your own identity.
+    CODE_SIGN_STYLE: Manual
+    ENABLE_BITCODE: NO
+targets:
+  @@TARGET@@:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - path: Resources
+        type: folder
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleDisplayName: @@APP_NAME_YAML@@
+        CFBundleShortVersionString: "@@VERSION@@"
+        CFBundleVersion: "1"
+        UILaunchStoryboardName: ""
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations: [@@ORIENTATIONS@@]
+        # Lets the player drop a ROM in through Files.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: @@BUNDLE_ID@@
+        OTHER_LDFLAGS: "$(inherited)"
+    dependencies:
+      - sdk: AVFoundation.framework

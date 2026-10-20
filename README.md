@@ -40,6 +40,12 @@ reatk decompress data.lz -o data.bin  # LZ77 / LZ11 / Huffman / RLE
 reatk narc pack.narc                  # NARC の一覧（-o で抽出）
 reatk sdat sound.sdat                 # SSEQ/SBNK/SWAR の一覧（-o で抽出）
 reatk gfx sheet.ncgr palette.nclr -o sheet.png
+reatk decompress arm9.bin -o arm9.dec --blz   # ARM9 の BLZ 圧縮
+
+# ほかのタイトルから素材を取り込む
+reatk map --from donor.nds --to target.nds -o map.json       # 対応付けの下書き
+reatk import --from donor.nds --to target.nds --map map.json --dry-run
+reatk import --from donor.nds --to target.nds --map map.json --emit apk -o build/
 
 # APK プロジェクトを生成（ROM は同梱せず、起動後に端末から読み込む）
 reatk convert game.nds -t apk -o build/android
@@ -58,27 +64,41 @@ reatk convert homebrew.nds -t apk -o build/hb --embed-rom --i-own-this-rom
 | --- | --- |
 | `reatk.formats` | NDS / GBA ヘッダ、NitroFS、バナー、**NARC**、**SDAT**、**NCLR/NCGR**、**BIOS 圧縮**（LZ77/LZ11/Huffman/RLE） |
 | `reatk.analyze` | 読み取り専用の検査パス（CRC、エントロピー、残留文字列、未使用領域、中身の内訳） |
-| `reatk.convert` | アセット変換（アイコン・グラフィック → PNG、圧縮展開、アーカイブ再帰展開）。PNG 書き出しも自前実装 |
-| `reatk.package` | Android（Gradle + JNI ホスト）/ iOS（XcodeGen + Swift）プロジェクトの生成 |
+| `reatk.convert` | アセット変換（グラフィック ⇄ PNG、圧縮展開、アーカイブ再帰展開）。PNG の読み書きとも自前実装 |
+| `reatk.transfer` | タイトル間の素材移植（対応付け・再圧縮・再エンコード） |
+| `reatk.package` | Android（Gradle + GL 描画 + AAudio + JNI ホスト）/ iOS（XcodeGen + Swift + AVAudioEngine）プロジェクトの生成 |
 | `reatk.plugins` | 各段階に割り込むユーザー機能 |
 
-### 生成されるプロジェクトについて（ここは正直に）
+### 生成されるプロジェクトについて
 
-生成されるのは**ビルド可能なプロジェクトの骨組み**です。以下は意図的に含めていません。
+**コアを入れなくてもビルドして起動します。** その場合はテストパターンが動き、
+2画面のレイアウトとタッチ操作をその場で確認できます（描画経路の問題とコアの
+不在を切り分けられる）。
 
-* **エミュレータコア** — libretro コア（melonDS / DeSmuME など）を自分で用意し、
-  Android なら `jniLibs/<abi>/`、iOS なら静的リンクで組み込みます。
-* **`libretro.h`** — libretro-common から取得して `cpp/` に置きます。
-* **署名** — 自分の署名で各自ビルドします。
-* **映像・音声の最終出力** — Android 側は `reatk_host.c` がコアを `dlopen` して
-  フレームを RGBA で JVM へ渡すところまで実装済み。GL/Metal への描画と音声出力は
-  `TODO` として明示してあります。
+生成されるもの:
 
-つまり「ROM を入れたら動くアプリが出てくる」ツールではなく、**1 タイトル専用の
-フロントエンドを機械的に用意するツール**です。
+* **描画** — Android は GLSurfaceView + シェーダでフレームをテクスチャ化し、
+  manifest のレイアウトに従って上下画面を別々の矩形へ描画。iOS は CADisplayLink
+  と CALayer（`contentsRect` で上下に分割）。
+* **音声** — Android は AAudio（コアの `retro_get_system_av_info` のサンプルレート
+  で開く）、iOS は AVAudioEngine の `AVAudioSourceNode`。
+* **入力** — manifest のレイアウトから十字キー（斜め入力対応）・A/B/X/Y・L/R・
+  START/SELECT を描画し、下画面の矩形へのタッチはスタイラス座標へ変換。
+* **BIOS/セーブの置き場** — アプリ専用領域をコアの system directory として渡します。
 
-対応フォーマットの詳細・未対応のもの（ARM9 の BLZ、NSCR の画面合成など）は
-[docs/formats.md](docs/formats.md) に一覧があります。
+自分で用意するもの:
+
+* **エミュレータコア** — libretro コア（melonDS 等）。Android は
+  `jniLibs/<abi>/lib<core>_libretro_android.so` に置けば起動時に自動で見つかります。
+  iOS は `dlopen` できないので静的リンクし、`EmulatorCore` プロトコルを実装して
+  `EmuCore.shared` に差します。
+* **`libretro.h`**（libretro-common から）と**署名キー**。
+* セーブステートや高解像度描画が必要なら、そこは手を入れてください
+  （各プロジェクトの README に Known limits として明記してあります）。
+
+対応フォーマットの詳細と未対応のもの（NSCR の画面合成など）は
+[docs/formats.md](docs/formats.md)、タイトル間の素材移植は
+[docs/import.md](docs/import.md) に書いてあります。
 
 ## プラグイン（オリジナル機能の追加）
 
@@ -103,6 +123,7 @@ class MyPlugin(Plugin):
 | --- | --- |
 | `ips-patch` | IPS パッチをメモリ上の ROM に適用（`--set ips=patch.ips`） |
 | `asset-replace` | ROM 内ファイルを自前のファイルに差し替え（`--set assets=./mod`）。`extract` では展開結果に反映、`convert` ではアプリ内 `reatk/overrides/` に同梱して manifest に記録 |
+| `cross-import` | 別タイトルから素材を取り込む（`--set from=donor.nds --set map=map.json`） |
 | `touch-controls` | タッチ操作レイアウトを manifest に書き込む（`--set layout=my.json`） |
 
 ```sh

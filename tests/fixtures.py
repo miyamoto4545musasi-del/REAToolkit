@@ -159,20 +159,22 @@ def make_nclr(colours: list[int] | None = None) -> bytes:
 
     values = colours or [index * 0x0421 for index in range(16)]
     payload = struct.pack("<IIII", 3, 0, len(values) * 2, 16)
-    payload += b"\x00" * 4  # data offset field, unused by readers
     payload += b"".join(struct.pack("<H", value) for value in values)
     return write_header("RLCN", [write_section("TTLP", payload)])
 
 
-def make_ncgr(width_tiles: int = 2, height_tiles: int = 1) -> bytes:
-    """A 4bpp NCGR sheet whose pixels encode their own index."""
+def make_ncgr(width_tiles: int = 2, height_tiles: int = 1, seed: int = 0) -> bytes:
+    """A 4bpp NCGR sheet whose pixels encode their own index.
+
+    *seed* shifts the pattern, so two fixtures can hold different artwork.
+    """
     from reatk.formats.nitro import write_header, write_section
 
     tiles = bytearray()
     for tile in range(width_tiles * height_tiles):
         for pixel in range(32):
-            low = (tile + pixel) % 16
-            high = (tile + pixel + 1) % 16
+            low = (tile + pixel + seed) % 16
+            high = (tile + pixel + seed + 1) % 16
             tiles.append(low | high << 4)
     payload = struct.pack("<HH", height_tiles, width_tiles)
     payload += struct.pack("<I", 3)              # 4bpp
@@ -296,3 +298,19 @@ def make_rich_nds() -> bytes:
             "gfx.ncgr": make_ncgr(width_tiles=4, height_tiles=2),
         }
     )
+
+
+def make_nds_with_blz_arm9() -> bytes:
+    """An image whose ARM9 region holds a BLZ-compressed binary."""
+    from reatk.formats.compression import compress_blz
+
+    payload = b"arm9 entry stub" + bytes(17) + b"repeated block " * 100
+    packed = compress_blz(payload, verbatim=32)
+
+    image = bytearray(make_nds())
+    # The fixture reserves ARM9_SIZE bytes; keep the region's declared size.
+    assert len(packed) <= ARM9_SIZE, "fixture ARM9 region is too small"
+    image[ARM9_OFF : ARM9_OFF + ARM9_SIZE] = packed.ljust(ARM9_SIZE, b"\x00")
+    struct.pack_into("<I", image, 0x2C, len(packed))
+    struct.pack_into("<H", image, 0x15E, crc16_modbus(bytes(image[:0x15E])))
+    return bytes(image)
