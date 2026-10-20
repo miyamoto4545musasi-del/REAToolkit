@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+# never commit dumps or cores
+*.nds
+*.gba
+*.srl
+*.so
+*.dylib

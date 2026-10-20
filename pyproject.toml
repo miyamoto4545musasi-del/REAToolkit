@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reatoolkit"
+version = "0.1.0"
+description = "Reverse-engineer handheld ROM images and re-package them as Android or iOS projects"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Disassemblers",
+    "Topic :: System :: Emulators",
+]
+dependencies = []
+
+[project.scripts]
+reatk = "reatk.cli:main"
+
+[project.urls]
+Source = "https://github.com/miyamoto4545musasi-del/REAToolkit"
+
+[tool.setuptools.packages.find]
+include = ["reatk*"]
